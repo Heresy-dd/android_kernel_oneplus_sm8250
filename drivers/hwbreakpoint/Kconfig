@@ -1,0 +1,5 @@
+config HWBREAKPOINT_PROC
+	tristate "Hardware Breakpoint Proc module"
+	default m
+	help
+	  Hardware breakpoint debugging driver for ARM64.

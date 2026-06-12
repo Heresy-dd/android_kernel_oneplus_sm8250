@@ -1,0 +1,5 @@
+config RWPROCMEM33
+	tristate "rwProcMem33 kernel module"
+	default m
+	help
+	  Process memory read/write driver for ARM64.
