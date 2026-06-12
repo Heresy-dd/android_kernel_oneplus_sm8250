@@ -36,7 +36,7 @@ jobs:
         export CLANG_TRIPLE=aarch64-linux-gnu-
         export CROSS_COMPILE=aarch64-linux-gnu-
         export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-        make O=out ARCH=arm64 vendor/kona_defconfig
+        make O=out ARCH=arm64 vendor/kona_defconfig droidspaces.config
         scripts/config --file out/.config -e CONFIG_NAMESPACES -e CONFIG_PID_NS -e CONFIG_UTS_NS -e CONFIG_IPC_NS -e CONFIG_NET_NS -e CONFIG_CGROUPS -e CONFIG_CGROUP_DEVICE -e CONFIG_MEMCG -e CONFIG_OVERLAY_FS -e CONFIG_VETH -e CONFIG_BRIDGE -e CONFIG_NETFILTER -e CONFIG_RWPROCMEM33 -e CONFIG_HWBREAKPOINT_PROC
         make O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 -j$(nproc --all)
 
