@@ -70,7 +70,11 @@ static int ret_ptrace_handler(struct kretprobe_instance *ri, struct pt_regs *reg
     }
     
     // Check if the buffer of the IoV is readable and writable
+#if MY_LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)
+    if (!access_ok(VERIFY_READ, (void __user *)data->iov.iov_base, data->iov.iov_len)) {
+#else
     if (!access_ok((void __user *)data->iov.iov_base, data->iov.iov_len)) {
+#endif
         printk_debug(KERN_INFO "User buffer is not accessible\n");
         return 0;
     }
