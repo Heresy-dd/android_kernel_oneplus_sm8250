@@ -3,47 +3,175 @@ name: Build Kernel
 on:
   push:
     branches:
+      - lineage-23.2-base
       - droidspaces-rwprocmem
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE*'
+      - 'COPYING'
+      - 'Documentation/**'
   pull_request:
+    branches:
+      - lineage-23.2-base
   workflow_dispatch:
+    inputs:
+      defconfig:
+        description: 'Base defconfig'
+        default: 'vendor/kona_defconfig'
+        required: true
+      extra_config:
+        description: 'Extra config fragment (optional)'
+        default: 'droidspaces.config'
+        required: false
+
+env:
+  KERNEL_ARCH: arm64
+  KBUILD_BUILD_USER: github
+  KBUILD_BUILD_HOST: actions
+  # ThankYouMario standalone Clang — known to build msm-5.4 kernels for sm8250.
+  CLANG_REPO: https://gitlab.com/ThankYouMario/android_prebuilts_clang-standalone.git
 
 jobs:
   build:
+    name: Build kernel (${{ github.ref_name }})
     runs-on: ubuntu-22.04
+    timeout-minutes: 90
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-      with:
-        submodules: false
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 1
 
-    - name: Setup build environment
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses5 libncurses5-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev
+      - name: Free runner disk space
+        run: |
+          set -e
+          echo "Before cleanup:"; df -h /
+          sudo rm -rf /opt/hostedtoolcache /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo apt-get -y autoremove --purge
+          sudo apt-get -y clean
+          echo "After cleanup:"; df -h /
 
-    - name: Setup Clang
-      run: |
-        mkdir -p ~/toolchains
-        cd ~/toolchains
-        git clone --depth=1 https://gitlab.com/ThankYouMario/android_prebuilts_clang-standalone.git clang
+      - name: Install build dependencies
+        run: |
+          set -e
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ccache cpio curl flex git gnupg gperf \
+            kmod libelf-dev libssl-dev libxml2-utils \
+            libncurses-dev libreadline-dev zlib1g-dev \
+            lzop rsync unzip xz-utils zip \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            python3 python-is-python3
 
-    - name: Build kernel
-      run: |
-        export PATH=~/toolchains/clang/bin:$PATH
-        export ARCH=arm64
-        export SUBARCH=arm64
-        export CLANG_TRIPLE=aarch64-linux-gnu-
-        export CROSS_COMPILE=aarch64-linux-gnu-
-        export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-        make O=out ARCH=arm64 vendor/kona_defconfig droidspaces.config
-        scripts/config --file out/.config -e CONFIG_NAMESPACES -e CONFIG_PID_NS -e CONFIG_UTS_NS -e CONFIG_IPC_NS -e CONFIG_NET_NS -e CONFIG_CGROUPS -e CONFIG_CGROUP_DEVICE -e CONFIG_MEMCG -e CONFIG_OVERLAY_FS -e CONFIG_VETH -e CONFIG_BRIDGE -e CONFIG_NETFILTER -e CONFIG_RWPROCMEM33 -e CONFIG_HWBREAKPOINT_PROC
-        make O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 -j$(nproc --all)
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ github.ref_name }}-
+            ccache-
 
-    - name: Upload kernel
-      uses: actions/upload-artifact@v4
-      with:
-        name: kernel-image
-        path: |
-          out/arch/arm64/boot/Image*
-          out/arch/arm64/boot/dts/vendor/qcom/*.dtb
+      - name: Configure ccache
+        run: |
+          set -e
+          ccache -M 5G
+          ccache -o compression=true
+          ccache -z
+
+      - name: Setup Clang toolchain
+        run: |
+          set -e
+          mkdir -p "$HOME/toolchains"
+          cd "$HOME/toolchains"
+          # Cache-friendly shallow clone; tarball fallback omitted because GitLab serves repo zips poorly for large LFS trees.
+          for i in 1 2 3; do
+            if git clone --depth=1 "$CLANG_REPO" clang; then
+              break
+            fi
+            echo "Clang clone attempt $i failed, retrying..."
+            rm -rf clang
+            sleep 5
+          done
+          [ -x "$HOME/toolchains/clang/bin/clang" ] || { echo "Clang download failed"; exit 1; }
+          echo "$HOME/toolchains/clang/bin" >> "$GITHUB_PATH"
+
+      - name: Print toolchain versions
+        run: |
+          clang --version
+          ld.lld --version || true
+          aarch64-linux-gnu-gcc --version
+          arm-linux-gnueabi-gcc --version
+          make --version | head -1
+
+      - name: Configure kernel
+        env:
+          DEFCONFIG: ${{ github.event.inputs.defconfig || 'vendor/kona_defconfig' }}
+          EXTRA_CONFIG: ${{ github.event.inputs.extra_config || 'droidspaces.config' }}
+        run: |
+          set -euo pipefail
+          export ARCH=arm64 SUBARCH=arm64
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+
+          if [ -n "$EXTRA_CONFIG" ] && [ -f "arch/arm64/configs/vendor/$EXTRA_CONFIG" ]; then
+            make O=out ARCH=arm64 "$DEFCONFIG" "$EXTRA_CONFIG"
+          else
+            make O=out ARCH=arm64 "$DEFCONFIG"
+          fi
+
+          scripts/config --file out/.config \
+            -e CONFIG_NAMESPACES -e CONFIG_PID_NS -e CONFIG_UTS_NS \
+            -e CONFIG_IPC_NS -e CONFIG_NET_NS -e CONFIG_CGROUPS \
+            -e CONFIG_CGROUP_DEVICE -e CONFIG_MEMCG -e CONFIG_OVERLAY_FS \
+            -e CONFIG_VETH -e CONFIG_BRIDGE -e CONFIG_NETFILTER \
+            -e CONFIG_RWPROCMEM33 -e CONFIG_HWBREAKPOINT_PROC
+
+          make O=out ARCH=arm64 olddefconfig
+
+      - name: Build kernel
+        run: |
+          set -euo pipefail
+          export ARCH=arm64 SUBARCH=arm64
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          export KBUILD_BUILD_TIMESTAMP="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+
+          make O=out ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
+               OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
+               LLVM=1 LLVM_IAS=1 \
+               -j"$(nproc --all)"
+
+      - name: ccache statistics
+        if: always()
+        run: ccache -s || true
+
+      - name: Collect build artifacts
+        if: success()
+        run: |
+          set -e
+          mkdir -p artifacts/dtbs
+          # Kernel image(s)
+          for f in out/arch/arm64/boot/Image out/arch/arm64/boot/Image.gz out/arch/arm64/boot/Image.gz-dtb; do
+            [ -f "$f" ] && cp "$f" artifacts/
+          done
+          # DTBs (if present)
+          if [ -d out/arch/arm64/boot/dts/vendor/qcom ]; then
+            find out/arch/arm64/boot/dts/vendor/qcom -name '*.dtb' -exec cp {} artifacts/dtbs/ \; || true
+          fi
+          # Final config
+          cp out/.config artifacts/kernel.config
+          ls -la artifacts/
+
+      - name: Upload kernel artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ github.ref_name }}-${{ github.sha }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 14
